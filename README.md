@@ -34,11 +34,24 @@ Labels are next-week log returns minus SPY's next-week return.
 2. **Autoencoder + Linear**: Learn compressed representation via reconstruction, use bottleneck for prediction
 3. **MLP**: Direct 2-layer feedforward network
 
-### QCML (coming soon)
-- Map features to complex amplitude vectors via learned encoder
-- Normalize to unit vectors in C^d (Hilbert space)
-- Predict via Hermitian observable: y = Re(<ψ|W|ψ>)
-- Train with MSE + pairwise ranking loss (interference term)
+### QCML (Quantum-Cognitive Model)
+The core model implements a quantum-inspired architecture:
+
+1. **Hilbert Space Encoder**: Maps feature vector x ∈ R^F to complex amplitudes z ∈ C^d
+   - Two-layer MLP: F → hidden → 2d (real and imaginary parts)
+   - Normalize to unit vector: |ψ⟩ = z / ||z||
+
+2. **Hermitian Observable**: Learnable matrix W = A + A† (ensures Hermiticity)
+   - Prediction: ŷ = Re(⟨ψ|W|ψ⟩)
+
+3. **Loss Function**: Combined MSE + ranking loss
+   - MSE term: Standard regression loss
+   - Ranking term: Pairwise hinge loss within each week
+   - Mimics quantum interference between competing "concept states"
+
+**Ablations supported:**
+- No ranking loss (MSE only)
+- Real-only embeddings (no imaginary part)
 
 ## Project Structure
 
@@ -69,8 +82,13 @@ python scripts/run_data_prep.py
 # Train baseline models
 python scripts/train_baselines.py
 
-# (after implementing QCML)
+# Train QCML model
 python scripts/train_qcml.py
+
+# With ablations (no ranking, real-only)
+python scripts/train_qcml.py --run-ablations
+
+# Run backtest (coming soon)
 python scripts/run_backtest.py
 ```
 
