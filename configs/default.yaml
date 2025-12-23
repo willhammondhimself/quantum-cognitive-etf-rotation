@@ -1,0 +1,82 @@
+# QCML ETF Rotation - Default Configuration
+
+# Universe
+tickers:
+  benchmark: "SPY"
+  etfs:
+    - "XLK"   # Tech
+    - "XLF"   # Financials
+    - "XLE"   # Energy
+    - "XLY"   # Consumer Discretionary
+    - "XLP"   # Consumer Staples
+    - "XLV"   # Healthcare
+    - "XLU"   # Utilities
+    - "XLI"   # Industrials
+    - "XLB"   # Materials
+    - "MTUM"  # Momentum Factor
+    - "QUAL"  # Quality Factor
+    - "VLUE"  # Value Factor
+    - "USMV"  # Min Vol Factor
+    - "IWD"   # Russell 1000 Value
+    - "IWF"   # Russell 1000 Growth
+    - "IWM"   # Russell 2000
+    - "IWB"   # Russell 1000
+
+# Data settings
+data:
+  start_date: "2012-01-01"
+  cache_dir: "data/cache"
+
+# Feature settings
+features:
+  return_windows: [1, 5, 20]  # days
+  vol_window: 20
+
+# Train/val/test split ratios
+splits:
+  train: 0.6
+  val: 0.2
+  test: 0.2
+
+# Model hyperparameters
+models:
+  pca_ridge:
+    n_components: 5
+    alpha: 1.0
+
+  autoencoder:
+    hidden_dim: 32
+    bottleneck_dim: 8
+    lr: 0.001
+    epochs: 100
+    batch_size: 64
+
+  mlp:
+    hidden_dims: [64, 32]
+    dropout: 0.2
+    lr: 0.001
+    epochs: 100
+    batch_size: 64
+
+  qcml:
+    hilbert_dim: 16
+    encoder_hidden: 32
+    lr: 0.001
+    epochs: 150
+    batch_size: 64
+    ranking_weight: 0.3
+    ranking_margin: 0.01
+    pairs_per_week: 10
+
+# Training settings
+training:
+  early_stopping_patience: 15
+  lr_scheduler_patience: 5
+  lr_scheduler_factor: 0.5
+  seed: 42
+
+# Backtest settings
+backtest:
+  top_k: 3
+  transaction_cost_bps: 5
+  strategy: "long_short"  # or "long_hedge_spy"
