@@ -88,7 +88,7 @@ python scripts/train_qcml.py
 # With ablations (no ranking, real-only)
 python scripts/train_qcml.py --run-ablations
 
-# Run backtest (coming soon)
+# Run backtest and compare models
 python scripts/run_backtest.py
 ```
 
