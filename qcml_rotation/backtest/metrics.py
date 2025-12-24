@@ -341,3 +341,259 @@ def metrics_to_dict(metrics: PerformanceMetrics) -> Dict:
         "avg_turnover": metrics.avg_turnover,
         "n_trades": metrics.n_trades
     }
+
+
+# =============================================================================
+# Statistical Significance Tests
+# =============================================================================
+
+@dataclass
+class SignificanceResult:
+    """Results from statistical significance testing."""
+    sharpe_ratio: float
+    sharpe_ci_lower: float
+    sharpe_ci_upper: float
+    sharpe_p_value: float
+    is_significant: bool  # p < 0.05
+    n_bootstrap: int
+    confidence_level: float
+
+
+def bootstrap_sharpe_ci(
+    returns: np.ndarray,
+    n_bootstrap: int = 1000,
+    confidence_level: float = 0.95,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 52,
+    random_state: Optional[int] = None
+) -> tuple:
+    """
+    Compute bootstrap confidence interval for Sharpe ratio.
+
+    Parameters
+    ----------
+    returns : array
+        Period returns.
+    n_bootstrap : int
+        Number of bootstrap samples.
+    confidence_level : float
+        Confidence level (e.g., 0.95 for 95% CI).
+    risk_free_rate : float
+        Annual risk-free rate.
+    periods_per_year : int
+        Number of periods per year.
+    random_state : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    tuple : (lower_bound, upper_bound, sharpe_samples)
+    """
+    returns = np.asarray(returns)
+    n = len(returns)
+
+    if n == 0:
+        return (0.0, 0.0, np.array([]))
+
+    rng = np.random.RandomState(random_state)
+    sharpe_samples = np.zeros(n_bootstrap)
+
+    for i in range(n_bootstrap):
+        # Resample with replacement
+        boot_indices = rng.choice(n, size=n, replace=True)
+        boot_returns = returns[boot_indices]
+        sharpe_samples[i] = sharpe_ratio(
+            boot_returns, risk_free_rate, periods_per_year
+        )
+
+    # Compute percentile CI
+    alpha = 1 - confidence_level
+    lower = np.percentile(sharpe_samples, 100 * alpha / 2)
+    upper = np.percentile(sharpe_samples, 100 * (1 - alpha / 2))
+
+    return (lower, upper, sharpe_samples)
+
+
+def sharpe_p_value(
+    returns: np.ndarray,
+    n_bootstrap: int = 1000,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 52,
+    random_state: Optional[int] = None
+) -> float:
+    """
+    Compute p-value for testing H0: Sharpe ratio <= 0.
+
+    Uses bootstrap under the null hypothesis (centered returns).
+
+    Parameters
+    ----------
+    returns : array
+        Period returns.
+    n_bootstrap : int
+        Number of bootstrap samples.
+    risk_free_rate : float
+        Annual risk-free rate.
+    periods_per_year : int
+        Number of periods per year.
+    random_state : int, optional
+        Random seed.
+
+    Returns
+    -------
+    p_value : float
+        One-sided p-value.
+    """
+    returns = np.asarray(returns)
+    n = len(returns)
+
+    if n == 0:
+        return 1.0
+
+    # Observed Sharpe
+    observed_sharpe = sharpe_ratio(returns, risk_free_rate, periods_per_year)
+
+    # Center returns to simulate H0: mean = rf
+    rf_per_period = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
+    centered_returns = returns - np.mean(returns) + rf_per_period
+
+    rng = np.random.RandomState(random_state)
+    null_sharpes = np.zeros(n_bootstrap)
+
+    for i in range(n_bootstrap):
+        boot_indices = rng.choice(n, size=n, replace=True)
+        boot_returns = centered_returns[boot_indices]
+        null_sharpes[i] = sharpe_ratio(boot_returns, risk_free_rate, periods_per_year)
+
+    # P-value: proportion of null samples >= observed
+    p_value = np.mean(null_sharpes >= observed_sharpe)
+
+    return float(p_value)
+
+
+def permutation_test(
+    predictions: np.ndarray,
+    actuals: np.ndarray,
+    n_permutations: int = 1000,
+    metric_fn: Optional[callable] = None,
+    random_state: Optional[int] = None
+) -> tuple:
+    """
+    Permutation test for prediction skill.
+
+    Tests whether predictions have more skill than random.
+
+    Parameters
+    ----------
+    predictions : array of shape (n_weeks, n_etfs)
+        Predicted values.
+    actuals : array of shape (n_weeks, n_etfs)
+        Actual values.
+    n_permutations : int
+        Number of permutations.
+    metric_fn : callable, optional
+        Function(predictions, actuals) -> score. Default is hit_rate.
+    random_state : int, optional
+        Random seed.
+
+    Returns
+    -------
+    tuple : (observed_score, p_value, null_distribution)
+    """
+    if metric_fn is None:
+        metric_fn = lambda p, a: hit_rate(p, a, top_k=3)
+
+    predictions = np.asarray(predictions)
+    actuals = np.asarray(actuals)
+
+    observed_score = metric_fn(predictions, actuals)
+
+    rng = np.random.RandomState(random_state)
+    null_scores = np.zeros(n_permutations)
+
+    n_weeks = predictions.shape[0]
+
+    for i in range(n_permutations):
+        # Shuffle predictions within each week (breaks prediction-actual link)
+        shuffled_preds = predictions.copy()
+        for week in range(n_weeks):
+            rng.shuffle(shuffled_preds[week])
+
+        null_scores[i] = metric_fn(shuffled_preds, actuals)
+
+    # P-value: proportion of null scores >= observed
+    p_value = np.mean(null_scores >= observed_score)
+
+    return (observed_score, float(p_value), null_scores)
+
+
+def compute_significance(
+    returns: np.ndarray,
+    predictions: Optional[np.ndarray] = None,
+    actuals: Optional[np.ndarray] = None,
+    n_bootstrap: int = 1000,
+    confidence_level: float = 0.95,
+    random_state: Optional[int] = None
+) -> SignificanceResult:
+    """
+    Compute comprehensive significance statistics.
+
+    Parameters
+    ----------
+    returns : array
+        Period returns.
+    predictions : array, optional
+        For permutation test.
+    actuals : array, optional
+        For permutation test.
+    n_bootstrap : int
+        Number of bootstrap/permutation samples.
+    confidence_level : float
+        Confidence level for CI.
+    random_state : int, optional
+        Random seed.
+
+    Returns
+    -------
+    result : SignificanceResult
+    """
+    returns = np.asarray(returns)
+
+    # Sharpe and CI
+    observed_sharpe = sharpe_ratio(returns)
+    ci_lower, ci_upper, _ = bootstrap_sharpe_ci(
+        returns,
+        n_bootstrap=n_bootstrap,
+        confidence_level=confidence_level,
+        random_state=random_state
+    )
+
+    # P-value
+    p_val = sharpe_p_value(
+        returns,
+        n_bootstrap=n_bootstrap,
+        random_state=random_state
+    )
+
+    return SignificanceResult(
+        sharpe_ratio=observed_sharpe,
+        sharpe_ci_lower=ci_lower,
+        sharpe_ci_upper=ci_upper,
+        sharpe_p_value=p_val,
+        is_significant=p_val < 0.05,
+        n_bootstrap=n_bootstrap,
+        confidence_level=confidence_level
+    )
+
+
+def significance_to_dict(result: SignificanceResult) -> Dict:
+    """Convert SignificanceResult to dictionary."""
+    return {
+        "sharpe_ratio": result.sharpe_ratio,
+        "sharpe_ci_lower": result.sharpe_ci_lower,
+        "sharpe_ci_upper": result.sharpe_ci_upper,
+        "sharpe_p_value": result.sharpe_p_value,
+        "is_significant": result.is_significant,
+        "n_bootstrap": result.n_bootstrap,
+        "confidence_level": result.confidence_level
+    }
