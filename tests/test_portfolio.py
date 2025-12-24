@@ -4,6 +4,7 @@ Tests for portfolio construction module.
 
 import pytest
 import numpy as np
+import pandas as pd
 
 import sys
 from pathlib import Path
@@ -42,7 +43,7 @@ class TestPortfolio:
             Position(ticker='XLK', weight=0.5, side='long'),
             Position(ticker='XLF', weight=0.5, side='short'),
         ]
-        portfolio = Portfolio(positions=positions)
+        portfolio = Portfolio(positions=positions, date=pd.Timestamp('2020-01-01'))
         assert len(portfolio.positions) == 2
 
     def test_portfolio_long_weights_sum(self):
@@ -52,7 +53,7 @@ class TestPortfolio:
             Position(ticker='XLF', weight=0.25, side='long'),
             Position(ticker='XLE', weight=0.5, side='short'),
         ]
-        portfolio = Portfolio(positions=positions)
+        portfolio = Portfolio(positions=positions, date=pd.Timestamp('2020-01-01'))
 
         long_weights = sum(p.weight for p in portfolio.positions if p.side == 'long')
         assert abs(long_weights - 0.5) < 0.001
@@ -86,8 +87,9 @@ class TestPortfolioConstructor:
 
         predictions = np.array([0.02, 0.01, -0.01, -0.02, 0.005])
         tickers = ['XLK', 'XLF', 'XLE', 'XLY', 'XLP']
+        date = pd.Timestamp('2020-01-01')
 
-        portfolio = constructor.construct(predictions, tickers)
+        portfolio = constructor.construct(predictions, tickers, date)
 
         # Check we have positions
         assert len(portfolio.positions) > 0
@@ -106,8 +108,9 @@ class TestPortfolioConstructor:
 
         predictions = np.array([0.02, 0.01, -0.01, -0.02, 0.005])
         tickers = ['XLK', 'XLF', 'XLE', 'XLY', 'XLP']
+        date = pd.Timestamp('2020-01-01')
 
-        portfolio = constructor.construct(predictions, tickers)
+        portfolio = constructor.construct(predictions, tickers, date)
 
         long_weight = sum(p.weight for p in portfolio.positions if p.side == 'long')
         short_weight = sum(p.weight for p in portfolio.positions if p.side == 'short')
@@ -122,8 +125,9 @@ class TestPortfolioConstructor:
 
         predictions = np.array([0.03, 0.02, 0.01, -0.01, -0.02, -0.03])
         tickers = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6']
+        date = pd.Timestamp('2020-01-01')
 
-        portfolio = constructor.construct(predictions, tickers)
+        portfolio = constructor.construct(predictions, tickers, date)
 
         long_weight = sum(p.weight for p in portfolio.positions if p.side == 'long')
         short_weight = sum(p.weight for p in portfolio.positions if p.side == 'short')
@@ -144,8 +148,9 @@ class TestTurnoverCalculation:
 
         predictions = np.array([0.02, 0.01, -0.01, -0.02])
         tickers = ['XLK', 'XLF', 'XLE', 'XLY']
+        date = pd.Timestamp('2020-01-01')
 
-        portfolio = constructor.construct(predictions, tickers)
+        portfolio = constructor.construct(predictions, tickers, date)
 
         # Initial turnover = sum of absolute weights = 1.0
         total_weight = sum(p.weight for p in portfolio.positions)
@@ -160,9 +165,11 @@ class TestTurnoverCalculation:
         preds1 = np.array([0.02, 0.01, -0.01, -0.02])
         preds2 = np.array([-0.02, -0.01, 0.01, 0.02])  # Completely reversed
         tickers = ['XLK', 'XLF', 'XLE', 'XLY']
+        date1 = pd.Timestamp('2020-01-01')
+        date2 = pd.Timestamp('2020-01-08')
 
-        p1 = constructor.construct(preds1, tickers)
-        p2 = constructor.construct(preds2, tickers)
+        p1 = constructor.construct(preds1, tickers, date1)
+        p2 = constructor.construct(preds2, tickers, date2)
 
         # Compute turnover manually
         weights1 = {p.ticker: p.weight * (1 if p.side == 'long' else -1) for p in p1.positions}

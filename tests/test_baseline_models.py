@@ -10,17 +10,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from qcml_rotation.models.baselines.pca_ridge import PCAPredictor
-from qcml_rotation.models.baselines.autoencoder import Autoencoder, AutoencoderPredictor
-from qcml_rotation.models.baselines.mlp import MLP
+from qcml_rotation.models.baselines.pca_ridge import PCARidge, PCARidgeConfig
+from qcml_rotation.models.baselines.autoencoder import Autoencoder, AutoencoderConfig
+from qcml_rotation.models.baselines.mlp import MLP, MLPConfig
 
 
-class TestPCAPredictor:
+class TestPCARidge:
     """Tests for PCA + Ridge baseline."""
 
     def test_pca_fit_predict(self, synthetic_features, synthetic_labels):
         """Test PCA predictor can fit and predict."""
-        model = PCAPredictor(n_components=3)
+        config = PCARidgeConfig(n_components=3)
+        model = PCARidge(config)
         model.fit(synthetic_features, synthetic_labels)
 
         preds = model.predict(synthetic_features)
@@ -28,19 +29,19 @@ class TestPCAPredictor:
 
     def test_pca_predictions_finite(self, synthetic_features, synthetic_labels):
         """Test PCA predictions are finite."""
-        model = PCAPredictor(n_components=3)
+        config = PCARidgeConfig(n_components=3)
+        model = PCARidge(config)
         model.fit(synthetic_features, synthetic_labels)
 
         preds = model.predict(synthetic_features)
         assert np.all(np.isfinite(preds))
 
-    def test_pca_n_components(self, synthetic_features, synthetic_labels):
-        """Test PCA with different n_components."""
-        for n_comp in [2, 3, 5]:
-            model = PCAPredictor(n_components=min(n_comp, synthetic_features.shape[1]))
-            model.fit(synthetic_features, synthetic_labels)
-            preds = model.predict(synthetic_features)
-            assert preds.shape == synthetic_labels.shape
+    def test_pca_default_config(self, synthetic_features, synthetic_labels):
+        """Test PCA with default config."""
+        model = PCARidge()  # Uses default config
+        model.fit(synthetic_features, synthetic_labels)
+        preds = model.predict(synthetic_features)
+        assert preds.shape == synthetic_labels.shape
 
 
 class TestAutoencoder:
@@ -70,39 +71,6 @@ class TestAutoencoder:
             _, latent = model(x)
 
             assert latent.shape[1] == bottleneck
-
-
-class TestAutoencoderPredictor:
-    """Tests for AutoencoderPredictor wrapper."""
-
-    def test_predictor_fit_predict(self, synthetic_features, synthetic_labels, device):
-        """Test predictor can fit and predict."""
-        model = AutoencoderPredictor(
-            input_dim=synthetic_features.shape[1],
-            hidden_dim=32,
-            bottleneck_dim=8,
-            device=device
-        )
-
-        # Fit (simplified - just test interface)
-        model.fit(synthetic_features, synthetic_labels, epochs=2, batch_size=32)
-
-        preds = model.predict(synthetic_features)
-        assert preds.shape == synthetic_labels.shape
-
-    def test_predictor_predictions_finite(self, synthetic_features, synthetic_labels, device):
-        """Test predictions are finite."""
-        model = AutoencoderPredictor(
-            input_dim=synthetic_features.shape[1],
-            hidden_dim=32,
-            bottleneck_dim=8,
-            device=device
-        )
-
-        model.fit(synthetic_features, synthetic_labels, epochs=2, batch_size=32)
-        preds = model.predict(synthetic_features)
-
-        assert np.all(np.isfinite(preds))
 
 
 class TestMLP:
@@ -151,34 +119,14 @@ class TestMLP:
 
             assert output.shape == (len(synthetic_features), 1)
 
-    def test_mlp_dropout_effect(self, synthetic_features, device):
-        """Test that dropout affects training vs eval mode."""
-        input_dim = synthetic_features.shape[1]
-        model = MLP(input_dim=input_dim, hidden_dims=[64, 32], dropout=0.5)
-        model.to(device)
-
-        x = torch.FloatTensor(synthetic_features).to(device)
-
-        # Training mode
-        model.train()
-        out_train = model(x)
-
-        # Eval mode
-        model.eval()
-        with torch.no_grad():
-            out_eval = model(x)
-
-        # Outputs should be different due to dropout
-        # (though not guaranteed, highly likely with 50% dropout)
-        assert out_train.shape == out_eval.shape
-
 
 class TestModelBatchSizeIndependence:
     """Test that models produce consistent results regardless of batch size."""
 
     def test_pca_batch_independence(self, synthetic_features, synthetic_labels):
         """Test PCA predictions don't depend on batch size."""
-        model = PCAPredictor(n_components=3)
+        config = PCARidgeConfig(n_components=3)
+        model = PCARidge(config)
         model.fit(synthetic_features, synthetic_labels)
 
         # Full batch

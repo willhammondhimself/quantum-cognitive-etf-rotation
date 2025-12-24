@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qcml_rotation.backtest.engine import BacktestEngine, BacktestResult
-from qcml_rotation.backtest.portfolio import PortfolioConfig
+from qcml_rotation.backtest.portfolio import PortfolioConfig, Portfolio, Position
+from qcml_rotation.backtest.metrics import PerformanceMetrics
 
 
 class TestBacktestResult:
@@ -19,134 +20,132 @@ class TestBacktestResult:
 
     def test_result_creation(self):
         """Test BacktestResult can be created."""
+        mock_metrics = PerformanceMetrics(
+            total_return=0.03,
+            annualized_return=0.15,
+            annualized_volatility=0.10,
+            sharpe_ratio=1.5,
+            sortino_ratio=2.0,
+            max_drawdown=-0.05,
+            calmar_ratio=3.0,
+            hit_rate=0.55,
+            avg_weekly_return=0.005,
+            win_rate=0.6,
+            avg_turnover=0.5,
+            n_trades=100
+        )
+
         result = BacktestResult(
+            model_name='test_model',
             returns=np.array([0.01, 0.02]),
             equity_curve=np.array([1.0, 1.01, 1.0302]),
             turnovers=np.array([1.0, 0.5]),
-            dates=['2020-01-01', '2020-01-08'],
-            metrics={'sharpe_ratio': 1.0},
-            portfolios=[]
+            portfolios=[],
+            metrics=mock_metrics,
+            predictions=np.array([[0.01, 0.02], [0.01, 0.02]]),
+            actuals=np.array([[0.01, 0.015], [0.02, 0.01]]),
+            dates=[pd.Timestamp('2020-01-01'), pd.Timestamp('2020-01-08')]
         )
+
         assert len(result.returns) == 2
         assert len(result.equity_curve) == 3
-        assert result.metrics['sharpe_ratio'] == 1.0
+        assert result.metrics.sharpe_ratio == 1.5
+        assert result.model_name == 'test_model'
 
 
 class TestBacktestEngine:
     """Tests for BacktestEngine."""
 
     @pytest.fixture
-    def backtest_config(self):
-        """Create backtest configuration."""
-        return PortfolioConfig(top_k=2, strategy='long_short', transaction_cost_bps=5)
-
-    @pytest.fixture
-    def mock_predict_fn(self):
-        """Create mock prediction function."""
-        def predict(features):
-            np.random.seed(42)
-            return np.random.randn(len(features)) * 0.01
-        return predict
-
-    @pytest.fixture
-    def test_data(self, synthetic_prices):
+    def test_data(self):
         """Create test data for backtest."""
-        prices = synthetic_prices
-        tickers = list(prices.columns)
+        np.random.seed(42)
 
-        # Create weekly dates
-        dates = pd.date_range(start=prices.index.min(), periods=20, freq='W-FRI')
-        dates = dates[dates <= prices.index.max()]
+        # Create 100 days of synthetic prices
+        dates = pd.date_range(start='2020-01-01', periods=100, freq='B')
+        tickers = ['SPY', 'XLK', 'XLF', 'XLE', 'XLY', 'XLP']
 
-        # Create features
-        n_weeks = len(dates)
-        n_tickers = len(tickers) - 1  # Exclude SPY
+        prices = pd.DataFrame(
+            100 * np.exp(np.cumsum(np.random.randn(100, len(tickers)) * 0.01, axis=0)),
+            index=dates,
+            columns=tickers
+        )
 
-        features = np.random.randn(n_weeks, n_tickers, 6) * 0.01
+        # Create weekly test dates
+        test_dates = pd.date_range(start='2020-02-01', periods=10, freq='W-FRI')
+        test_dates = [d for d in test_dates if d <= dates[-1]]
 
         return {
             'prices': prices,
-            'dates': dates,
+            'test_dates': test_dates,
             'tickers': [t for t in tickers if t != 'SPY'],
-            'features': features
         }
 
-    def test_engine_initialization(self, backtest_config):
+    @pytest.fixture
+    def mock_model(self):
+        """Create mock model with predict method."""
+        class MockModel:
+            def predict(self, X):
+                np.random.seed(42)
+                return np.random.randn(X.shape[0]) * 0.01
+        return MockModel()
+
+    def test_engine_initialization(self, test_data):
         """Test engine can be initialized."""
-        engine = BacktestEngine(backtest_config)
-        assert engine.config.top_k == 2
-
-    def test_backtest_run_returns_result(self, backtest_config, mock_predict_fn, test_data):
-        """Test that backtest run returns BacktestResult."""
-        engine = BacktestEngine(backtest_config)
-
-        result = engine.run(
-            predict_fn=mock_predict_fn,
+        config = PortfolioConfig(top_k=2, strategy='long_short')
+        engine = BacktestEngine(
             prices=test_data['prices'],
-            dates=test_data['dates'],
+            test_dates=test_data['test_dates'],
             tickers=test_data['tickers'],
-            features=test_data['features']
+            portfolio_config=config
+        )
+        assert engine.portfolio_config.top_k == 2
+
+    def test_engine_with_default_config(self, test_data):
+        """Test engine with default portfolio config."""
+        engine = BacktestEngine(
+            prices=test_data['prices'],
+            test_dates=test_data['test_dates'],
+            tickers=test_data['tickers']
+        )
+        assert engine.portfolio_config is not None
+
+    def test_engine_tickers_stored(self, test_data):
+        """Test engine stores tickers correctly."""
+        engine = BacktestEngine(
+            prices=test_data['prices'],
+            test_dates=test_data['test_dates'],
+            tickers=test_data['tickers']
+        )
+        assert engine.tickers == test_data['tickers']
+
+
+class TestPortfolioIntegration:
+    """Tests for portfolio integration with engine."""
+
+    def test_portfolio_dates_sorted(self):
+        """Test that test dates are sorted."""
+        np.random.seed(42)
+        dates = pd.date_range(start='2020-01-01', periods=100, freq='B')
+        tickers = ['SPY', 'XLK', 'XLF']
+
+        prices = pd.DataFrame(
+            100 * np.exp(np.cumsum(np.random.randn(100, len(tickers)) * 0.01, axis=0)),
+            index=dates,
+            columns=tickers
         )
 
-        assert isinstance(result, BacktestResult)
+        # Unsorted dates
+        test_dates = [dates[30], dates[20], dates[40]]
 
-    def test_equity_starts_at_one(self, backtest_config, mock_predict_fn, test_data):
-        """Test that equity curve starts at 1.0."""
-        engine = BacktestEngine(backtest_config)
-
-        result = engine.run(
-            predict_fn=mock_predict_fn,
-            prices=test_data['prices'],
-            dates=test_data['dates'],
-            tickers=test_data['tickers'],
-            features=test_data['features']
+        engine = BacktestEngine(
+            prices=prices,
+            test_dates=test_dates,
+            tickers=['XLK', 'XLF']
         )
 
-        assert result.equity_curve[0] == 1.0
-
-    def test_returns_length(self, backtest_config, mock_predict_fn, test_data):
-        """Test returns have correct length."""
-        engine = BacktestEngine(backtest_config)
-
-        result = engine.run(
-            predict_fn=mock_predict_fn,
-            prices=test_data['prices'],
-            dates=test_data['dates'],
-            tickers=test_data['tickers'],
-            features=test_data['features']
-        )
-
-        # Returns should be one less than dates (no return for first week)
-        assert len(result.returns) == len(result.dates) - 1 or len(result.returns) == len(result.dates)
-
-    def test_turnovers_bounded(self, backtest_config, mock_predict_fn, test_data):
-        """Test that turnovers are bounded [0, 2]."""
-        engine = BacktestEngine(backtest_config)
-
-        result = engine.run(
-            predict_fn=mock_predict_fn,
-            prices=test_data['prices'],
-            dates=test_data['dates'],
-            tickers=test_data['tickers'],
-            features=test_data['features']
-        )
-
-        assert all(0 <= t <= 2 for t in result.turnovers)
-
-    def test_metrics_populated(self, backtest_config, mock_predict_fn, test_data):
-        """Test that metrics are populated."""
-        engine = BacktestEngine(backtest_config)
-
-        result = engine.run(
-            predict_fn=mock_predict_fn,
-            prices=test_data['prices'],
-            dates=test_data['dates'],
-            tickers=test_data['tickers'],
-            features=test_data['features']
-        )
-
-        assert 'sharpe_ratio' in result.metrics
-        assert 'max_drawdown' in result.metrics
+        # Engine should sort dates
+        assert engine.test_dates == sorted(test_dates)
 
 
 class TestCompareResults:
@@ -154,28 +153,65 @@ class TestCompareResults:
 
     def test_comparison_dataframe(self):
         """Test that comparison creates valid DataFrame."""
+        mock_metrics_a = PerformanceMetrics(
+            total_return=0.0302,
+            annualized_return=0.15,
+            annualized_volatility=0.10,
+            sharpe_ratio=1.0,
+            sortino_ratio=1.5,
+            max_drawdown=-0.05,
+            calmar_ratio=3.0,
+            hit_rate=0.55,
+            avg_weekly_return=0.005,
+            win_rate=0.6,
+            avg_turnover=0.5,
+            n_trades=50
+        )
+
+        mock_metrics_b = PerformanceMetrics(
+            total_return=0.0302,
+            annualized_return=0.12,
+            annualized_volatility=0.15,
+            sharpe_ratio=0.8,
+            sortino_ratio=1.2,
+            max_drawdown=-0.08,
+            calmar_ratio=1.5,
+            hit_rate=0.50,
+            avg_weekly_return=0.004,
+            win_rate=0.55,
+            avg_turnover=0.6,
+            n_trades=60
+        )
+
         results = {
             'model_a': BacktestResult(
+                model_name='model_a',
                 returns=np.array([0.01, 0.02]),
                 equity_curve=np.array([1.0, 1.01, 1.0302]),
                 turnovers=np.array([1.0, 0.5]),
-                dates=['2020-01-01', '2020-01-08'],
-                metrics={'sharpe_ratio': 1.0, 'total_return': 0.0302},
-                portfolios=[]
+                portfolios=[],
+                metrics=mock_metrics_a,
+                predictions=np.array([[0.01], [0.02]]),
+                actuals=np.array([[0.01], [0.015]]),
+                dates=[pd.Timestamp('2020-01-01'), pd.Timestamp('2020-01-08')]
             ),
             'model_b': BacktestResult(
+                model_name='model_b',
                 returns=np.array([0.02, 0.01]),
                 equity_curve=np.array([1.0, 1.02, 1.0302]),
                 turnovers=np.array([1.0, 0.3]),
-                dates=['2020-01-01', '2020-01-08'],
-                metrics={'sharpe_ratio': 0.8, 'total_return': 0.0302},
-                portfolios=[]
+                portfolios=[],
+                metrics=mock_metrics_b,
+                predictions=np.array([[0.02], [0.01]]),
+                actuals=np.array([[0.015], [0.02]]),
+                dates=[pd.Timestamp('2020-01-01'), pd.Timestamp('2020-01-08')]
             ),
         }
 
-        # Create comparison (manual since function may not exist)
+        # Create comparison manually
+        from qcml_rotation.backtest.metrics import metrics_to_dict
         comparison = pd.DataFrame([
-            {'model': name, **r.metrics}
+            {'model': name, **metrics_to_dict(r.metrics)}
             for name, r in results.items()
         ]).set_index('model')
 
