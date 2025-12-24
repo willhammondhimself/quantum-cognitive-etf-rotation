@@ -29,8 +29,16 @@ class TestFullPipeline:
 
         n_weeks = 50
         n_tickers = 5
-        n_features = 6
         tickers = ['XLK', 'XLF', 'XLE', 'XLY', 'XLP']
+
+        # Use basic features config (no extended features for simpler testing)
+        feature_config = FeatureConfig(
+            include_technical=False,
+            include_cross_sectional=False,
+            include_regime=False
+        )
+        feature_names = get_feature_names(feature_config)
+        n_features = len(feature_names)
 
         # Generate features
         features = np.random.randn(n_weeks * n_tickers, n_features) * 0.01
@@ -39,7 +47,7 @@ class TestFullPipeline:
         labels = np.random.randn(n_weeks * n_tickers) * 0.01
 
         # Create DataFrame
-        data = pd.DataFrame(features, columns=get_feature_names(FeatureConfig()))
+        data = pd.DataFrame(features, columns=feature_names)
         data['excess_return'] = labels
 
         # Add metadata

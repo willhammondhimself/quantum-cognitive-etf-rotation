@@ -164,6 +164,80 @@ def load_cached_data(cache_dir: str = "data/cache") -> Tuple[pd.DataFrame, pd.Da
     return prices, volume
 
 
+def download_vix_data(
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> pd.Series:
+    """
+    Download VIX index data from Yahoo Finance.
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYY-MM-DD format.
+    end_date : str, optional
+        End date. Defaults to today.
+    cache_dir : str
+        Directory to cache parquet file.
+    force_refresh : bool
+        If True, re-download even if cache exists.
+
+    Returns
+    -------
+    vix : pd.Series
+        VIX closing values, indexed by date.
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    vix_file = cache_path / "vix.parquet"
+
+    # Check cache
+    if not force_refresh and vix_file.exists():
+        vix_df = pd.read_parquet(vix_file)
+        print(f"Loaded cached VIX data: {len(vix_df)} days")
+        return vix_df["VIX"]
+
+    print(f"Downloading VIX data from {start_date} to {end_date}...")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = yf.download(
+            "^VIX",
+            start=start_date,
+            end=end_date,
+            auto_adjust=True,
+            progress=False
+        )
+
+    if data.empty:
+        print("Warning: No VIX data downloaded")
+        return pd.Series(dtype=float, name="VIX")
+
+    # Handle multi-index columns from yfinance
+    if isinstance(data.columns, pd.MultiIndex):
+        vix = data["Close"]["^VIX"].copy()
+    else:
+        vix = data["Close"].copy()
+
+    vix.name = "VIX"
+
+    # Clean data
+    vix = vix.ffill().bfill()
+
+    # Cache
+    vix_df = pd.DataFrame({"VIX": vix})
+    vix_df.to_parquet(vix_file)
+
+    print(f"Downloaded and cached VIX: {len(vix)} days")
+    return vix
+
+
 def get_trading_dates(
     prices: pd.DataFrame,
     freq: str = "W-FRI"

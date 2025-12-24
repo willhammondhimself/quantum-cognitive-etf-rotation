@@ -41,22 +41,68 @@ class TestFeatureConfig:
 class TestGetFeatureNames:
     """Tests for get_feature_names function."""
 
-    def test_feature_names_count(self):
-        """Test correct number of feature names."""
-        config = FeatureConfig(return_windows=[1, 5, 20], vol_window=20)
+    def test_basic_feature_names_count(self):
+        """Test correct number of basic feature names."""
+        config = FeatureConfig(
+            return_windows=[1, 5, 20],
+            vol_window=20,
+            include_technical=False,
+            include_cross_sectional=False,
+            include_regime=False
+        )
         names = get_feature_names(config)
         # 3 return features + 1 vol + 2 relative features = 6
         assert len(names) == 6
 
+    def test_extended_feature_names_count(self):
+        """Test correct number of extended feature names."""
+        config = FeatureConfig(
+            return_windows=[1, 5, 20],
+            vol_window=20,
+            include_technical=True,
+            include_cross_sectional=True,
+            include_regime=True
+        )
+        names = get_feature_names(config)
+        # 6 basic + 5 technical (rsi, bollinger_b, atr, mom_20d, mom_60d)
+        # + 4 cross-sectional + 2 regime = 17
+        assert len(names) == 17
+
     def test_feature_names_content(self):
         """Test feature names contain expected patterns."""
-        config = FeatureConfig(return_windows=[1, 5, 20])
+        config = FeatureConfig(
+            return_windows=[1, 5, 20],
+            include_technical=False,
+            include_cross_sectional=False,
+            include_regime=False
+        )
         names = get_feature_names(config)
 
         assert 'ret_1d' in names
         assert 'ret_5d' in names
         assert 'ret_20d' in names
         assert 'vol_20d' in names
+
+    def test_extended_feature_names_content(self):
+        """Test extended feature names contain expected patterns."""
+        config = FeatureConfig()  # Default includes extended features
+        names = get_feature_names(config)
+
+        # Check technical indicators
+        assert 'rsi' in names
+        assert 'bollinger_b' in names
+        assert 'atr' in names
+        assert 'mom_20d' in names
+        assert 'mom_60d' in names
+
+        # Check cross-sectional features
+        assert 'rank_mom_20d' in names
+        assert 'rank_vol' in names
+        assert 'zscore_mom_20d' in names
+
+        # Check regime features
+        assert 'market_regime' in names
+        assert 'vol_regime' in names
 
 
 class TestFeatureValues:
