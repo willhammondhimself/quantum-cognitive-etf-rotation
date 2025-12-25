@@ -280,3 +280,260 @@ def get_trading_dates(
                     valid_dates.append(prior_date)
 
     return pd.DatetimeIndex(valid_dates)
+
+
+def download_treasury_data(
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Download Treasury yield data for yield curve analysis.
+
+    Uses Treasury ETFs as proxies:
+    - SHY: 1-3 year Treasury (short end)
+    - IEI: 3-7 year Treasury (intermediate)
+    - IEF: 7-10 year Treasury (long end)
+    - TLT: 20+ year Treasury (very long)
+
+    The yield curve slope can be approximated from price ratios.
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYY-MM-DD format.
+    end_date : str, optional
+        End date. Defaults to today.
+    cache_dir : str
+        Directory to cache parquet file.
+    force_refresh : bool
+        If True, re-download even if cache exists.
+
+    Returns
+    -------
+    treasury_data : pd.DataFrame
+        Treasury ETF prices and derived yield curve features.
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    treasury_file = cache_path / "treasury.parquet"
+
+    # Check cache
+    if not force_refresh and treasury_file.exists():
+        treasury_df = pd.read_parquet(treasury_file)
+        print(f"Loaded cached Treasury data: {len(treasury_df)} days")
+        return treasury_df
+
+    print(f"Downloading Treasury data from {start_date} to {end_date}...")
+
+    treasury_etfs = ["SHY", "IEI", "IEF", "TLT"]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = yf.download(
+            treasury_etfs,
+            start=start_date,
+            end=end_date,
+            auto_adjust=True,
+            progress=False
+        )
+
+    if data.empty:
+        print("Warning: No Treasury data downloaded")
+        return pd.DataFrame()
+
+    # Handle multi-index columns
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data["Close"].copy()
+    else:
+        prices = data[["Close"]].copy()
+        prices.columns = treasury_etfs[:1]
+
+    prices = prices.ffill().bfill()
+
+    # Compute yield curve features
+    treasury_df = pd.DataFrame(index=prices.index)
+
+    # Store raw prices
+    for etf in treasury_etfs:
+        if etf in prices.columns:
+            treasury_df[etf] = prices[etf]
+
+    # Yield curve slope proxy: TLT/SHY ratio
+    # When long-term yields rise faster than short-term, TLT falls more
+    if "TLT" in prices.columns and "SHY" in prices.columns:
+        treasury_df["yield_curve_slope"] = prices["SHY"] / prices["TLT"]
+
+        # Yield curve steepening/flattening (change in slope)
+        treasury_df["yield_curve_change"] = treasury_df["yield_curve_slope"].pct_change(21)
+
+        # Yield curve inversion signal (when short > long)
+        # Actually approximated by TLT outperforming SHY
+        treasury_df["yield_curve_inverted"] = (
+            prices["TLT"].pct_change(63) > prices["SHY"].pct_change(63)
+        ).astype(int)
+
+    # Duration risk proxy: TLT volatility
+    if "TLT" in prices.columns:
+        tlt_returns = prices["TLT"].pct_change()
+        treasury_df["duration_risk"] = tlt_returns.rolling(21).std() * np.sqrt(252)
+
+    # Cache
+    treasury_df.to_parquet(treasury_file)
+
+    print(f"Downloaded and cached Treasury data: {len(treasury_df)} days")
+    return treasury_df
+
+
+def download_credit_spread_data(
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Download credit spread proxy data.
+
+    Uses ETF ratios as proxies for credit spreads:
+    - HYG/LQD ratio: High yield vs investment grade (credit risk appetite)
+    - JNK/TLT ratio: High yield vs Treasuries (credit spread proxy)
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYY-MM-DD format.
+    end_date : str, optional
+        End date. Defaults to today.
+    cache_dir : str
+        Directory to cache parquet file.
+    force_refresh : bool
+        If True, re-download even if cache exists.
+
+    Returns
+    -------
+    credit_data : pd.DataFrame
+        Credit spread proxy features.
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    credit_file = cache_path / "credit.parquet"
+
+    # Check cache
+    if not force_refresh and credit_file.exists():
+        credit_df = pd.read_parquet(credit_file)
+        print(f"Loaded cached Credit data: {len(credit_df)} days")
+        return credit_df
+
+    print(f"Downloading Credit spread data from {start_date} to {end_date}...")
+
+    credit_etfs = ["HYG", "LQD", "JNK", "TLT"]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = yf.download(
+            credit_etfs,
+            start=start_date,
+            end=end_date,
+            auto_adjust=True,
+            progress=False
+        )
+
+    if data.empty:
+        print("Warning: No Credit data downloaded")
+        return pd.DataFrame()
+
+    # Handle multi-index columns
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data["Close"].copy()
+    else:
+        prices = data[["Close"]].copy()
+        prices.columns = credit_etfs[:1]
+
+    prices = prices.ffill().bfill()
+
+    # Compute credit spread features
+    credit_df = pd.DataFrame(index=prices.index)
+
+    # HYG/LQD ratio: credit risk appetite
+    if "HYG" in prices.columns and "LQD" in prices.columns:
+        credit_df["hyg_lqd_ratio"] = prices["HYG"] / prices["LQD"]
+
+        # Change in credit risk appetite
+        credit_df["credit_appetite_change"] = credit_df["hyg_lqd_ratio"].pct_change(21)
+
+        # Credit stress indicator (when HYG underperforms LQD)
+        credit_df["credit_stress"] = (
+            prices["HYG"].pct_change(21) < prices["LQD"].pct_change(21)
+        ).astype(int)
+
+    # JNK/TLT ratio: credit spread proxy
+    if "JNK" in prices.columns and "TLT" in prices.columns:
+        credit_df["jnk_tlt_ratio"] = prices["JNK"] / prices["TLT"]
+
+        # Spread widening/tightening
+        credit_df["spread_change"] = credit_df["jnk_tlt_ratio"].pct_change(21)
+
+    # High yield momentum
+    if "HYG" in prices.columns:
+        hyg_returns = prices["HYG"].pct_change()
+        credit_df["hyg_momentum"] = prices["HYG"].pct_change(21)
+        credit_df["hyg_volatility"] = hyg_returns.rolling(21).std() * np.sqrt(252)
+
+    # Cache
+    credit_df.to_parquet(credit_file)
+
+    print(f"Downloaded and cached Credit data: {len(credit_df)} days")
+    return credit_df
+
+
+def download_macro_regime_data(
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Download all macro regime data (VIX, Treasury, Credit).
+
+    Convenience function that combines all regime indicators.
+
+    Returns
+    -------
+    macro_data : pd.DataFrame
+        Combined macro regime features.
+    """
+    # Download individual components
+    vix = download_vix_data(start_date, end_date, cache_dir, force_refresh)
+    treasury = download_treasury_data(start_date, end_date, cache_dir, force_refresh)
+    credit = download_credit_spread_data(start_date, end_date, cache_dir, force_refresh)
+
+    # Combine on common index
+    macro_df = pd.DataFrame(index=vix.index if hasattr(vix, 'index') else [])
+
+    if len(vix) > 0:
+        macro_df["vix"] = vix
+
+    if len(treasury) > 0:
+        for col in treasury.columns:
+            if col not in ["SHY", "IEI", "IEF", "TLT"]:  # Skip raw prices
+                macro_df[col] = treasury[col]
+
+    if len(credit) > 0:
+        for col in credit.columns:
+            if col not in ["HYG", "LQD", "JNK", "TLT"]:  # Skip raw prices
+                macro_df[col] = credit[col]
+
+    # Forward fill and clean
+    macro_df = macro_df.ffill().bfill()
+
+    print(f"Combined macro data: {len(macro_df)} days, {len(macro_df.columns)} features")
+    return macro_df
