@@ -54,6 +54,47 @@ For practical use, consider:
    - Go to cash when SPY < 200-day MA
    - Expected Sharpe: ~0.75, but Max DD: ~-15%
 
+## QCML Architecture Improvements (Phase 1)
+
+### Problem Diagnosis
+The original QCML showed zero predictive power due to:
+1. **Unit normalization** destroying magnitude information
+2. **Hilbert dimension d=16** being too small (bottleneck)
+3. **Complex arithmetic** adding overhead without benefit
+4. **Single measurement** collapsing all information to 1 scalar
+
+### Implemented Solutions
+
+**SimplifiedQCML** - Stripped-down version:
+- Removed unit normalization (preserves magnitude)
+- Real numbers only (no complex overhead)
+- Increased dimensions (hidden=64, embed=32)
+- Added batch normalization and dropout
+
+**RankingQCML** - Learning-to-rank approach:
+- RankNet/ListNet loss for correct ordering
+- Combined with small MSE component
+- Stronger regularization (dropout=0.2, weight_decay=1e-3)
+
+### Walk-Forward Benchmark Results
+
+| Model | Avg Fold Corr | Overall Corr | Sign Acc | Sharpe |
+|-------|---------------|--------------|----------|--------|
+| Original QCML | 0.001 | 0.003 | 49.6% | -0.35 |
+| Simplified QCML | -0.000 | -0.008 | 49.3% | -0.54 |
+| **Ranking QCML** | -0.000 | **0.008** | **50.0%** | -0.40 |
+| Momentum baseline | -0.013 | -0.012 | 49.4% | -0.67 |
+
+### Key Findings
+
+1. **Removing unit normalization helps on synthetic data** (98% vs 95% correlation)
+2. **Ranking loss improves correlation** (0.008 vs -0.008 for SimplifiedQCML)
+3. **Still insufficient for profitable trading** - all models have negative Sharpes
+4. **The problem is fundamental** - not just architecture
+
+### Conclusion
+The QCML improvements show marginal gains in prediction metrics but don't translate to profitable trading. The signal in sector ETF returns is simply too weak/noisy for neural networks to extract reliably. Simple momentum remains the best practical approach.
+
 ## Technical Improvements Made
 
 1. Added XGBoost and LightGBM models
@@ -63,6 +104,9 @@ For practical use, consider:
 5. Implemented rank-based prediction target
 6. Added monthly rebalancing support
 7. Created comprehensive experiment framework
+8. **Added SimplifiedQCML** (without unit normalization)
+9. **Added RankingQCML** (with RankNet/ListNet loss)
+10. **Added benchmark script** for comparing QCML variants
 
 ## Honest Conclusions
 
@@ -77,6 +121,8 @@ For practical use, consider:
 ## Files Created/Modified
 
 - `qcml_rotation/models/gradient_boosting.py` - XGBoost/LightGBM models
+- `qcml_rotation/models/qcml.py` - Added SimplifiedQCML, RankingQCML, RankNetLoss, ListNetLoss
 - `qcml_rotation/strategies/momentum.py` - Momentum and hybrid strategies
 - `qcml_rotation/data/loader.py` - Added Treasury and Credit data loading
 - `scripts/run_improved_experiments.py` - Comprehensive experiment script
+- `scripts/benchmark_simplified_qcml.py` - QCML variant comparison script
