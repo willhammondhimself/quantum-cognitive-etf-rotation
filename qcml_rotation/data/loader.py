@@ -120,6 +120,196 @@ def download_etf_data(
     return prices, volume
 
 
+def download_etf_data_ohlc(
+    tickers: Optional[List[str]] = None,
+    benchmark: str = DEFAULT_BENCHMARK,
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Download daily OHLC and volume data for ETFs.
+
+    OHLC-based volatility estimators are 5-7x more efficient than close-to-close.
+
+    Parameters
+    ----------
+    tickers : list of str, optional
+        ETF tickers to download. Defaults to sector + factor ETFs.
+    benchmark : str
+        Benchmark ticker (SPY by default).
+    start_date : str
+        Start date in YYYY-MM-DD format.
+    end_date : str, optional
+        End date. Defaults to today.
+    cache_dir : str
+        Directory to cache parquet files.
+    force_refresh : bool
+        If True, re-download even if cache exists.
+
+    Returns
+    -------
+    open_prices : pd.DataFrame
+        Opening prices, indexed by date, columns are tickers.
+    high_prices : pd.DataFrame
+        High prices, indexed by date, columns are tickers.
+    low_prices : pd.DataFrame
+        Low prices, indexed by date, columns are tickers.
+    close_prices : pd.DataFrame
+        Adjusted close prices, indexed by date, columns are tickers.
+    volume : pd.DataFrame
+        Volume data, same structure as prices.
+    """
+    if tickers is None:
+        tickers = DEFAULT_ETFS
+
+    # Make sure benchmark is included
+    all_tickers = [benchmark] + [t for t in tickers if t != benchmark]
+
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Cache files for OHLC
+    open_file = cache_path / "open.parquet"
+    high_file = cache_path / "high.parquet"
+    low_file = cache_path / "low.parquet"
+    close_file = cache_path / "close.parquet"
+    volume_file = cache_path / "volume_ohlc.parquet"
+
+    # Check cache
+    cache_files = [open_file, high_file, low_file, close_file, volume_file]
+    if not force_refresh and all(f.exists() for f in cache_files):
+        open_prices = pd.read_parquet(open_file)
+        high_prices = pd.read_parquet(high_file)
+        low_prices = pd.read_parquet(low_file)
+        close_prices = pd.read_parquet(close_file)
+        volume = pd.read_parquet(volume_file)
+
+        # Verify all tickers present
+        missing = set(all_tickers) - set(close_prices.columns)
+        if not missing:
+            print(f"Loaded cached OHLC data: {len(close_prices)} days, {len(close_prices.columns)} tickers")
+            return open_prices, high_prices, low_prices, close_prices, volume
+
+    print(f"Downloading OHLC data for {len(all_tickers)} tickers from {start_date} to {end_date}...")
+
+    # Download with yfinance
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = yf.download(
+            all_tickers,
+            start=start_date,
+            end=end_date,
+            auto_adjust=True,
+            progress=True
+        )
+
+    # Extract OHLC and volume
+    if isinstance(data.columns, pd.MultiIndex):
+        open_prices = data["Open"].copy()
+        high_prices = data["High"].copy()
+        low_prices = data["Low"].copy()
+        close_prices = data["Close"].copy()
+        volume = data["Volume"].copy()
+    else:
+        # Single ticker case
+        open_prices = data[["Open"]].copy()
+        open_prices.columns = [all_tickers[0]]
+        high_prices = data[["High"]].copy()
+        high_prices.columns = [all_tickers[0]]
+        low_prices = data[["Low"]].copy()
+        low_prices.columns = [all_tickers[0]]
+        close_prices = data[["Close"]].copy()
+        close_prices.columns = [all_tickers[0]]
+        volume = data[["Volume"]].copy()
+        volume.columns = [all_tickers[0]]
+
+    # Ensure column order
+    open_prices = open_prices[all_tickers]
+    high_prices = high_prices[all_tickers]
+    low_prices = low_prices[all_tickers]
+    close_prices = close_prices[all_tickers]
+    volume = volume[all_tickers]
+
+    # Handle missing data
+    open_prices = _clean_price_data(open_prices)
+    high_prices = _clean_price_data(high_prices)
+    low_prices = _clean_price_data(low_prices)
+    close_prices = _clean_price_data(close_prices)
+    volume = volume.fillna(0)
+
+    # Validate OHLC consistency
+    _validate_ohlc(open_prices, high_prices, low_prices, close_prices)
+
+    # Cache
+    open_prices.to_parquet(open_file)
+    high_prices.to_parquet(high_file)
+    low_prices.to_parquet(low_file)
+    close_prices.to_parquet(close_file)
+    volume.to_parquet(volume_file)
+
+    print(f"Downloaded and cached OHLC: {len(close_prices)} days, {len(close_prices.columns)} tickers")
+    return open_prices, high_prices, low_prices, close_prices, volume
+
+
+def _validate_ohlc(
+    open_prices: pd.DataFrame,
+    high_prices: pd.DataFrame,
+    low_prices: pd.DataFrame,
+    close_prices: pd.DataFrame
+) -> None:
+    """Validate OHLC data consistency (High >= Low, etc.)."""
+    # Check High >= Low
+    violations = (high_prices < low_prices).sum().sum()
+    if violations > 0:
+        print(f"Warning: {violations} instances where High < Low (fixing...)")
+        # Swap values where violated
+        mask = high_prices < low_prices
+        high_prices_fixed = high_prices.where(~mask, low_prices)
+        low_prices_fixed = low_prices.where(~mask, high_prices)
+        high_prices.update(high_prices_fixed)
+        low_prices.update(low_prices_fixed)
+
+    # Check High >= Open, Close and Low <= Open, Close
+    high_violations = ((high_prices < open_prices) | (high_prices < close_prices)).sum().sum()
+    low_violations = ((low_prices > open_prices) | (low_prices > close_prices)).sum().sum()
+
+    if high_violations > 0 or low_violations > 0:
+        print(f"Warning: {high_violations + low_violations} OHLC consistency issues (minor)")
+
+
+def load_cached_ohlc_data(cache_dir: str = "data/cache") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Load previously cached OHLC and volume data.
+
+    Raises FileNotFoundError if cache doesn't exist.
+    """
+    cache_path = Path(cache_dir)
+    open_file = cache_path / "open.parquet"
+    high_file = cache_path / "high.parquet"
+    low_file = cache_path / "low.parquet"
+    close_file = cache_path / "close.parquet"
+    volume_file = cache_path / "volume_ohlc.parquet"
+
+    cache_files = [open_file, high_file, low_file, close_file, volume_file]
+    if not all(f.exists() for f in cache_files):
+        raise FileNotFoundError(
+            f"OHLC cache not found in {cache_dir}. Run download_etf_data_ohlc first."
+        )
+
+    open_prices = pd.read_parquet(open_file)
+    high_prices = pd.read_parquet(high_file)
+    low_prices = pd.read_parquet(low_file)
+    close_prices = pd.read_parquet(close_file)
+    volume = pd.read_parquet(volume_file)
+
+    return open_prices, high_prices, low_prices, close_prices, volume
+
+
 def _clean_price_data(prices: pd.DataFrame) -> pd.DataFrame:
     """
     Clean price data by handling missing values.
@@ -236,6 +426,112 @@ def download_vix_data(
 
     print(f"Downloaded and cached VIX: {len(vix)} days")
     return vix
+
+
+def download_vix_term_structure(
+    start_date: str = "2012-01-01",
+    end_date: Optional[str] = None,
+    cache_dir: str = "data/cache",
+    force_refresh: bool = False
+) -> pd.DataFrame:
+    """
+    Download VIX and VIX3M for term structure analysis.
+
+    The VIX term structure (VIX/VIX3M ratio) is a powerful leading indicator:
+    - Ratio > 1 (backwardation): Near-term stress, market expects volatility
+    - Ratio < 1 (contango): Normal conditions, market calm
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYY-MM-DD format.
+    end_date : str, optional
+        End date. Defaults to today.
+    cache_dir : str
+        Directory to cache parquet file.
+    force_refresh : bool
+        If True, re-download even if cache exists.
+
+    Returns
+    -------
+    vix_term : pd.DataFrame
+        DataFrame with VIX, VIX3M, and derived term structure features.
+    """
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    vix_term_file = cache_path / "vix_term_structure.parquet"
+
+    # Check cache
+    if not force_refresh and vix_term_file.exists():
+        vix_term = pd.read_parquet(vix_term_file)
+        print(f"Loaded cached VIX term structure: {len(vix_term)} days")
+        return vix_term
+
+    print(f"Downloading VIX term structure from {start_date} to {end_date}...")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # Download both VIX and VIX3M
+        data = yf.download(
+            ["^VIX", "^VIX3M"],
+            start=start_date,
+            end=end_date,
+            auto_adjust=True,
+            progress=False
+        )
+
+    if data.empty:
+        print("Warning: No VIX term structure data downloaded")
+        return pd.DataFrame()
+
+    # Extract close prices
+    if isinstance(data.columns, pd.MultiIndex):
+        vix = data["Close"]["^VIX"].copy()
+        vix3m = data["Close"]["^VIX3M"].copy()
+    else:
+        # Fallback for single ticker case
+        vix = data["Close"].copy()
+        vix3m = pd.Series(dtype=float, index=vix.index)
+
+    # Clean data
+    vix = vix.ffill().bfill()
+    vix3m = vix3m.ffill().bfill()
+
+    # Build term structure DataFrame
+    vix_term = pd.DataFrame(index=vix.index)
+    vix_term["vix"] = vix
+    vix_term["vix3m"] = vix3m
+
+    # Term structure ratio (backwardation > 1, contango < 1)
+    vix_term["vix_term_structure"] = vix / vix3m
+
+    # Normalized term structure slope
+    vix_term["vix_term_slope"] = (vix3m - vix) / vix
+
+    # Term structure percentile (historical context)
+    vix_term["vix_term_percentile"] = vix_term["vix_term_structure"].rolling(252).rank(pct=True)
+
+    # Backwardation indicator (stress signal)
+    vix_term["vix_backwardation"] = (vix_term["vix_term_structure"] > 1.0).astype(float)
+
+    # VIX momentum features
+    vix_term["vix_change_1d"] = vix.pct_change()
+    vix_term["vix_change_5d"] = vix.pct_change(5)
+    vix_term["vix_ma_20d"] = vix.rolling(20).mean()
+    vix_term["vix_zscore"] = (vix - vix.rolling(20).mean()) / vix.rolling(20).std()
+
+    # VIX spike detection
+    vix_term["vix_spike"] = (vix.diff().abs() > 3.0).astype(float)  # 3+ point daily change
+
+    # Cache
+    vix_term.to_parquet(vix_term_file)
+
+    print(f"Downloaded and cached VIX term structure: {len(vix_term)} days")
+    return vix_term
 
 
 def get_trading_dates(

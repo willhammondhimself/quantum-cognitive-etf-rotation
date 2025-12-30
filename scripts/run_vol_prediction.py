@@ -36,7 +36,17 @@ from qcml_rotation.models.qcml import (
     RankingQCML, RankingQCMLConfig,
     QuantumEnhancedQCML, QuantumEnhancedConfig
 )
-from qcml_rotation.data.loader import download_etf_data, download_vix_data
+from qcml_rotation.data.loader import (
+    download_etf_data, download_vix_data,
+    download_etf_data_ohlc, download_vix_term_structure
+)
+from qcml_rotation.data.vol_estimators import (
+    compute_parkinson_volatility,
+    compute_garman_klass_volatility,
+    compute_rogers_satchell_volatility,
+    compute_yang_zhang_volatility,
+    compute_volatility_features_for_ticker
+)
 
 # Try to import XGBoost
 try:
@@ -168,6 +178,290 @@ def compute_vol_features(prices: pd.DataFrame, vix: Optional[pd.Series] = None) 
         features = features.set_index(['Date', 'ticker'] if 'Date' in features.columns else ['index', 'ticker'])
 
     return features
+
+
+def compute_enhanced_vol_features(
+    open_prices: pd.DataFrame,
+    high_prices: pd.DataFrame,
+    low_prices: pd.DataFrame,
+    close_prices: pd.DataFrame,
+    volume: pd.DataFrame,
+    vix_term: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    """
+    Compute enhanced features for volatility prediction using OHLC data.
+
+    This version includes:
+    - OHLC-based volatility estimators (5-7x more efficient)
+    - Volume features
+    - Asymmetric features (leverage effect)
+    - VIX term structure features
+
+    Parameters
+    ----------
+    open_prices : DataFrame with opening prices
+    high_prices : DataFrame with high prices
+    low_prices : DataFrame with low prices
+    close_prices : DataFrame with closing prices
+    volume : DataFrame with volume data
+    vix_term : DataFrame with VIX term structure (optional)
+
+    Returns
+    -------
+    features : DataFrame with enhanced features
+    """
+    returns = close_prices.pct_change()
+    features_list = []
+
+    for ticker in close_prices.columns:
+        ret = returns[ticker]
+        close = close_prices[ticker]
+        open_ = open_prices[ticker]
+        high = high_prices[ticker]
+        low = low_prices[ticker]
+        vol = volume[ticker]
+
+        df = pd.DataFrame(index=close_prices.index)
+
+        # ============================================
+        # 1. OHLC-BASED VOLATILITY ESTIMATORS
+        # ============================================
+        # These are 5-7x more efficient than close-to-close
+
+        # Parkinson (uses high-low range, 5.2x efficient)
+        df['vol_parkinson_5d'] = compute_parkinson_volatility(high, low, 5)
+        df['vol_parkinson_10d'] = compute_parkinson_volatility(high, low, 10)
+        df['vol_parkinson_20d'] = compute_parkinson_volatility(high, low, 20)
+
+        # Garman-Klass (uses OHLC, 7.4x efficient)
+        df['vol_gk_5d'] = compute_garman_klass_volatility(open_, high, low, close, 5)
+        df['vol_gk_10d'] = compute_garman_klass_volatility(open_, high, low, close, 10)
+        df['vol_gk_20d'] = compute_garman_klass_volatility(open_, high, low, close, 20)
+
+        # Yang-Zhang (best for overnight gaps)
+        df['vol_yz_5d'] = compute_yang_zhang_volatility(open_, high, low, close, 5)
+        df['vol_yz_10d'] = compute_yang_zhang_volatility(open_, high, low, close, 10)
+        df['vol_yz_20d'] = compute_yang_zhang_volatility(open_, high, low, close, 20)
+
+        # Rogers-Satchell (handles drift)
+        df['vol_rs_5d'] = compute_rogers_satchell_volatility(open_, high, low, close, 5)
+
+        # Close-to-close (baseline for comparison)
+        df['vol_cc_5d'] = ret.rolling(5).std() * np.sqrt(252)
+        df['vol_cc_10d'] = ret.rolling(10).std() * np.sqrt(252)
+        df['vol_cc_20d'] = ret.rolling(20).std() * np.sqrt(252)
+        df['vol_cc_60d'] = ret.rolling(60).std() * np.sqrt(252)
+
+        # Estimator ratios (unusual when range >> close-to-close)
+        df['vol_ratio_gk_cc'] = df['vol_gk_5d'] / (df['vol_cc_5d'] + 1e-8)
+        df['vol_ratio_yz_cc'] = df['vol_yz_5d'] / (df['vol_cc_5d'] + 1e-8)
+
+        # Vol term structure
+        df['vol_term_5_20'] = df['vol_yz_5d'] / (df['vol_yz_20d'] + 1e-8)
+        df['vol_term_5_60'] = df['vol_yz_5d'] / (df['vol_cc_60d'] + 1e-8)
+
+        # Vol changes
+        df['vol_change_5d'] = df['vol_yz_5d'] - df['vol_yz_5d'].shift(5)
+        df['vol_change_pct_5d'] = df['vol_yz_5d'].pct_change(5)
+
+        # Vol of vol (clustering)
+        df['vol_of_vol'] = df['vol_yz_5d'].rolling(20).std()
+
+        # ============================================
+        # 2. VOLUME FEATURES
+        # ============================================
+        # Volume often leads volatility
+
+        # Relative volume (vs 20-day average)
+        vol_ma = vol.rolling(20).mean()
+        df['volume_ratio'] = vol / (vol_ma + 1)
+
+        # Volume change
+        df['volume_change'] = vol.pct_change()
+        df['volume_change_5d'] = vol.pct_change(5)
+
+        # High volume indicator (spike detection)
+        df['high_volume'] = (vol > 2 * vol_ma).astype(float)
+        df['high_volume_count_20d'] = df['high_volume'].rolling(20).sum()
+
+        # Volume-weighted volatility
+        vol_norm = vol / vol.rolling(20).sum()
+        df['vol_weighted_vol'] = (ret.abs() * vol_norm).rolling(20).sum() * np.sqrt(252)
+
+        # Volume-volatility correlation (lead indicator)
+        df['vol_volume_corr'] = ret.abs().rolling(20).corr(vol)
+
+        # ============================================
+        # 3. ASYMMETRIC FEATURES (Leverage Effect)
+        # ============================================
+        # Negative returns lead to higher volatility
+
+        # Downside semi-variance
+        neg_ret = ret.where(ret < 0, 0)
+        df['downside_semivar'] = neg_ret.rolling(20).std() * np.sqrt(252)
+
+        # Upside semi-variance
+        pos_ret = ret.where(ret > 0, 0)
+        df['upside_semivar'] = pos_ret.rolling(20).std() * np.sqrt(252)
+
+        # Asymmetry ratio
+        df['semivar_ratio'] = df['downside_semivar'] / (df['upside_semivar'] + 1e-8)
+
+        # Negative return count (bad day frequency)
+        df['neg_return_pct'] = (ret < 0).rolling(20).sum() / 20
+
+        # Worst day in window
+        df['worst_day_20d'] = ret.rolling(20).min()
+        df['best_day_20d'] = ret.rolling(20).max()
+
+        # Skewness of returns (asymmetry indicator)
+        df['return_skew_20d'] = ret.rolling(20).skew()
+
+        # ============================================
+        # 4. RETURN FEATURES
+        # ============================================
+        df['ret_1d'] = ret
+        df['ret_5d'] = ret.rolling(5).sum()
+        df['ret_20d'] = ret.rolling(20).sum()
+        df['abs_ret_1d'] = ret.abs()
+        df['abs_ret_5d'] = ret.abs().rolling(5).mean()
+
+        # Jump detection
+        df['large_move'] = (df['abs_ret_1d'] > 2 * df['vol_cc_20d']).astype(float)
+        df['large_move_count_20d'] = df['large_move'].rolling(20).sum()
+
+        # Drawdown
+        rolling_max = close.rolling(20).max()
+        df['drawdown_20d'] = (close - rolling_max) / rolling_max
+
+        # ============================================
+        # 5. INTRADAY RANGE FEATURES
+        # ============================================
+        intraday_range = (high - low) / close
+        df['avg_range_5d'] = intraday_range.rolling(5).mean()
+        df['avg_range_20d'] = intraday_range.rolling(20).mean()
+        df['max_range_20d'] = intraday_range.rolling(20).max()
+
+        # Overnight vs intraday separation
+        overnight_ret = np.log(open_ / close.shift(1))
+        intraday_ret = np.log(close / open_)
+        df['overnight_vol_5d'] = overnight_ret.rolling(5).std() * np.sqrt(252)
+        df['intraday_vol_5d'] = intraday_ret.rolling(5).std() * np.sqrt(252)
+        df['overnight_intraday_ratio'] = df['overnight_vol_5d'] / (df['intraday_vol_5d'] + 1e-8)
+
+        df['ticker'] = ticker
+        features_list.append(df)
+
+    features = pd.concat(features_list)
+
+    # Cross-sectional rank (relative risk within universe)
+    features = features.reset_index()
+    date_col = 'Date' if 'Date' in features.columns else 'index'
+    features['vol_rank'] = features.groupby(date_col)['vol_yz_5d'].rank(pct=True)
+    features = features.set_index([date_col, 'ticker'])
+
+    # ============================================
+    # 6. VIX TERM STRUCTURE FEATURES
+    # ============================================
+    if vix_term is not None and len(vix_term) > 0:
+        features = features.reset_index()
+
+        # Merge VIX term structure features
+        vix_features = vix_term[['vix', 'vix3m', 'vix_term_structure', 'vix_term_slope',
+                                  'vix_term_percentile', 'vix_backwardation',
+                                  'vix_change_5d', 'vix_zscore', 'vix_spike']].copy()
+        vix_features = vix_features.reset_index()
+        vix_features.columns = ['Date'] + list(vix_features.columns[1:])
+
+        features = features.merge(
+            vix_features,
+            left_on='Date' if 'Date' in features.columns else 'index',
+            right_on='Date',
+            how='left'
+        )
+
+        features = features.set_index(['Date', 'ticker'] if 'Date' in features.columns else ['index', 'ticker'])
+
+    return features
+
+
+def prepare_enhanced_vol_data(
+    start_date: str = '2010-01-01',
+    end_date: str = '2024-01-01'
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
+    """
+    Download OHLC data and prepare enhanced features/labels for vol prediction.
+
+    This version uses OHLC-based volatility estimators which are 5-7x more efficient.
+
+    Returns
+    -------
+    data : DataFrame with features and labels
+    sector_prices : DataFrame with sector ETF close prices only
+    all_close : DataFrame with all close prices including SPY
+    feature_cols : list of feature column names
+    """
+    print("Downloading OHLC data for enhanced volatility features...")
+    open_prices, high_prices, low_prices, close_prices, volume = download_etf_data_ohlc(
+        tickers=ALL_ETFS,
+        start_date=start_date,
+        end_date=end_date,
+        force_refresh=True
+    )
+
+    print("Downloading VIX term structure...")
+    vix_term = download_vix_term_structure(
+        start_date=start_date,
+        end_date=end_date,
+        force_refresh=True
+    )
+
+    # Separate sector data
+    sector_open = open_prices[SECTOR_ETFS]
+    sector_high = high_prices[SECTOR_ETFS]
+    sector_low = low_prices[SECTOR_ETFS]
+    sector_close = close_prices[SECTOR_ETFS]
+    sector_volume = volume[SECTOR_ETFS]
+
+    print("Computing enhanced volatility features...")
+    features = compute_enhanced_vol_features(
+        sector_open, sector_high, sector_low, sector_close, sector_volume, vix_term
+    )
+
+    # Compute labels (forward-looking realized vol)
+    print("Computing realized volatility labels...")
+    realized_vol = compute_realized_volatility(sector_close, window=5)
+
+    # Reshape labels to match features
+    labels_list = []
+    for ticker in SECTOR_ETFS:
+        df = pd.DataFrame({
+            'realized_vol': realized_vol[ticker],
+            'ticker': ticker
+        }, index=realized_vol.index)
+        labels_list.append(df)
+
+    labels = pd.concat(labels_list)
+    labels = labels.reset_index()
+    date_col = 'Date' if 'Date' in labels.columns else 'index'
+    labels = labels.set_index([date_col, 'ticker'])
+
+    # Combine features and labels
+    data = features.join(labels, how='inner')
+
+    # Get feature columns (exclude ticker and label)
+    feature_cols = [c for c in data.columns if c not in ['ticker', 'realized_vol']]
+
+    # Drop NaN rows
+    n_before = len(data)
+    data = data.dropna()
+    n_dropped = n_before - len(data)
+    print(f"Dropped {n_dropped} rows with NaN values ({100*n_dropped/n_before:.1f}%)")
+
+    print(f"Prepared data: {len(data)} samples, {len(feature_cols)} features")
+    print(f"Feature categories: OHLC vol estimators, volume, asymmetric, returns, VIX term structure")
+
+    return data, sector_close, close_prices, feature_cols
 
 
 def prepare_vol_data(

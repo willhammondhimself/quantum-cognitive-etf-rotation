@@ -1792,3 +1792,178 @@ def create_quantum_enhanced_model(
         model = model.to(device)
 
     return model
+
+
+# ============================================================================
+# Phase 5.2: Cross-Feature Attention Architecture
+# ============================================================================
+
+
+class CrossFeatureAttention(nn.Module):
+    """
+    Cross-feature attention layer (Phase 5.2).
+
+    Learns interactions between features through multi-head attention.
+    Key insight: Not all features are equally important in all market regimes.
+    Attention allows the model to dynamically weight feature importance.
+    """
+
+    def __init__(self, embed_dim: int, n_heads: int = 4, dropout: float = 0.1):
+        """
+        Parameters
+        ----------
+        embed_dim : int
+            Embedding dimension (must be divisible by n_heads)
+        n_heads : int
+            Number of attention heads
+        dropout : float
+            Dropout probability
+        """
+        super().__init__()
+        self.attention = nn.MultiheadAttention(
+            embed_dim,
+            n_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply cross-feature attention with residual connection.
+
+        Parameters
+        ----------
+        x : torch.Tensor (batch, n_features, embed_dim)
+            Feature embeddings
+
+        Returns
+        -------
+        out : torch.Tensor (batch, n_features, embed_dim)
+            Attention-enhanced features
+        """
+        # Self-attention across features
+        attn_out, _ = self.attention(x, x, x)
+
+        # Residual connection + layer norm
+        out = self.norm(x + self.dropout(attn_out))
+
+        return out
+
+
+class EnhancedSimplifiedQCML(nn.Module):
+    """
+    SimplifiedQCML with cross-feature attention (Phase 5.2).
+
+    Architecture:
+    1. Per-feature embedding (Linear projection)
+    2. Cross-feature attention (learns feature interactions)
+    3. SimplifiedEncoder (processes attended features)
+    4. Predictor (final output)
+
+    Expected improvement: +0.02-0.04 correlation
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        config: Optional[SimplifiedQCMLConfig] = None,
+        n_attention_heads: int = 4,
+        use_attention: bool = True
+    ):
+        """
+        Parameters
+        ----------
+        input_dim : int
+            Number of input features
+        config : SimplifiedQCMLConfig, optional
+            Model configuration
+        n_attention_heads : int
+            Number of attention heads
+        use_attention : bool
+            If False, skip attention (for ablation study)
+        """
+        super().__init__()
+
+        if config is None:
+            config = SimplifiedQCMLConfig()
+
+        self.config = config
+        self.use_attention = use_attention
+        self.input_dim = input_dim
+
+        # Per-feature embedding
+        self.feature_embed = nn.Linear(1, config.embed_dim)
+
+        # Cross-feature attention
+        if use_attention:
+            self.cross_attention = CrossFeatureAttention(
+                config.embed_dim,
+                n_heads=n_attention_heads,
+                dropout=config.dropout
+            )
+
+        # Encoder processes flattened attended features
+        self.encoder = SimplifiedEncoder(
+            input_dim=input_dim * config.embed_dim,
+            embed_dim=config.embed_dim,
+            hidden_dim=config.hidden_dim,
+            n_hidden_layers=config.n_hidden_layers,
+            dropout=config.dropout,
+            use_batch_norm=config.use_batch_norm
+        )
+
+        # Predictor
+        self.predictor = SimplifiedPredictor(
+            embed_dim=config.embed_dim,
+            n_outputs=1
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with cross-feature attention.
+
+        Parameters
+        ----------
+        x : torch.Tensor (batch, n_features)
+            Input features
+
+        Returns
+        -------
+        y_hat : torch.Tensor (batch, 1)
+            Predicted volatility
+        """
+        # Embed each feature separately
+        # x: (batch, n_features) -> (batch, n_features, 1) -> (batch, n_features, embed_dim)
+        x = x.unsqueeze(-1)  # (batch, n_features, 1)
+        x = self.feature_embed(x)  # (batch, n_features, embed_dim)
+
+        # Apply cross-feature attention
+        if self.use_attention:
+            x = self.cross_attention(x)  # (batch, n_features, embed_dim)
+
+        # Flatten for encoder
+        x = x.flatten(1)  # (batch, n_features * embed_dim)
+
+        # Encode and predict
+        embedding = self.encoder(x)
+        prediction = self.predictor(embedding)
+
+        return prediction
+
+    def get_attention_weights(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Get attention weights for interpretability.
+
+        Returns None if attention is disabled.
+        """
+        if not self.use_attention:
+            return None
+
+        with torch.no_grad():
+            x = x.unsqueeze(-1)
+            x = self.feature_embed(x)
+            _, attn_weights = self.cross_attention.attention(x, x, x)
+
+        return attn_weights

@@ -8,3 +8,5 @@ seaborn>=0.12.0
 pyyaml>=6.0
 tqdm>=4.65.0
 pyarrow>=12.0.0
+hmmlearn>=0.3.0
+scipy>=1.10.0
